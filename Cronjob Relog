@@ -1,0 +1,6 @@
+#Relog - Makes Changes active/current at midnight, this helps if the users have not logged out for many days
+
+
+sudo crontab -e
+
+0 0 * * * bash -c 'for u in $(who | awk "{print \$1}" | sort -u | grep -v "^root$"); do pkill -KILL -u $u; done; crontab -l | grep -v logout-once | crontab -' # logout-once
