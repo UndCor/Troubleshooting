@@ -1,0 +1,7 @@
+#Copies Panels from one user to other users on the system
+# user1-user10
+
+for i in {1..10}; do
+    cp -p /home/(YourUserHere)/.config/lxpanel/LXDE/panels/{bottom,panel} /home/user$i/.config/lxpanel/LXDE/panels/
+    chown user$i:user /home/user$i/.config/lxpanel/LXDE/panels/{bottom,panel}
+done
