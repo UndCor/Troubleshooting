@@ -1,0 +1,10 @@
+#Remove 2nd Desktop from Debian without logging out, logging into each user
+#Takes affect on next login
+
+for dir in /home/*/; do
+  user_rc="${dir}.config/openbox/lxde-rc.xml"
+  if [ -f "$user_rc" ]; then
+    echo "Updating $user_rc"
+    sed -i 's/<number>[0-9]*<\/number>/<number>1<\/number>/g' "$user_rc"
+  fi
+done
