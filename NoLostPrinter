@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ======= CONFIG =======
+IFACE="eth0"                          # NIC on the same VLAN as the printer
+PRINTER_MAC="AA:BB:CC:DD:EE:FF"       # Target printer MAC (uppercase or lowercase ok)
+DESIRED_IP="10.0.20.50"               # The fixed IP you want the printer to have
+NETMASK="255.255.255.0"               # Used only if doing SNMP set
+GATEWAY="10.0.20.1"                   # Used only if doing SNMP set
+
+# SNMP (leave empty to disable SNMP set)
+SNMP_COMMUNITY="private"              # v2c community with write perms
+SNMP_VERSION="2c"                     # 1, 2c, or 3 (adjust below if using v3)
+
+# VENDOR-SPECIFIC OIDs (PLACEHOLDERS!)
+# Replace these with the correct ones for your printer firmware:
+# Example (DO NOT assume these are correct for your device):
+#   OID_IP_ADDR   : OID to set IP address as OctetString (e.g. "10.0.20.50")
+#   OID_NETMASK   : OID to set subnet mask
+#   OID_GATEWAY   : OID to set default gateway
+#   OID_APPLY     : OID to trigger apply/restart (integer/boolean)
+OID_IP_ADDR=""
+OID_NETMASK=""
+OID_GATEWAY=""
+OID_APPLY=""
+
+# Alerting (optional)
+SEND_EMAIL=""                         # e.g. "alerts@example.com" or leave blank
+HOSTNAME_TAG="$(hostname -s)"
+
+# ======= END CONFIG =======
+
+log() { logger -t printer-ip-keeper "$*"; echo "[$(date '+%F %T')] $*"; }
+mail_if() {
+  if [[ -n "$SEND_EMAIL" ]]; then
+    printf "%s\n" "$2" | mail -s "$1" "$SEND_EMAIL" || true
+  fi
+}
+
+# Normalize MAC to lowercase for comparisons
+norm_mac() {
+  echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+PRINTER_MAC_NORM="$(norm_mac "$PRINTER_MAC")"
+
+# 1) Quick check: does the desired IP already respond (and is it the right MAC)?
+if ping -c1 -W1 "$DESIRED_IP" >/dev/null 2>&1; then
+  # Verify ARP MAC if possible
+  CURRENT_MAC="$(ip neigh show "$DESIRED_IP" 2>/dev/null | awk '{print $5}' | head -n1 | tr '[:upper:]' '[:lower:]' || true)"
+  if [[ "$CURRENT_MAC" == "$PRINTER_MAC_NORM" && -n "$CURRENT_MAC" ]]; then
+    log "OK: Printer at $DESIRED_IP with correct MAC ($CURRENT_MAC)."
+    exit 0
+  fi
+fi
+
+# 2) Not at desired IP or unreachable: scan the LAN for the MAC
+FOUND_IP=""
+if have_cmd arp-scan; then
+  # Localnet scan (broadcast ARP); requires root
+  while IFS= read -r line; do
+    # arp-scan output: IP\tMAC\tVendor
+    ipaddr="$(echo "$line" | awk '{print $1}')"
+    mac="$(echo "$line" | awk '{print $2}' | tr '[:upper:]' '[:lower:]')"
+    [[ -z "$ipaddr" || -z "$mac" ]] && continue
+    if [[ "$mac" == "$PRINTER_MAC_NORM" ]]; then
+      FOUND_IP="$ipaddr"
+      break
+    fi
+  done < <(arp-scan --interface="$IFACE" --localnet 2>/dev/null | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/ {print $1, $2}')
+fi
+
+# Fallback: light nmap ping sweep if not found
+if [[ -z "$FOUND_IP" ]] && have_cmd nmap; then
+  # Try to infer the CIDR from the interface
+  CIDR="$(ip -o -f inet addr show "$IFACE" | awk '{print $4}' | head -n1)"
+  if [[ -n "$CIDR" ]]; then
+    nmap -sn "$CIDR" >/dev/null 2>&1 || true
+    # After ARP table warmed by nmap, re-check neighbors
+    while IFS= read -r nline; do
+      ipaddr="$(echo "$nline" | awk '{print $1}')"
+      mac="$(echo "$nline" | awk '{print $5}' | tr '[:upper:]' '[:lower:]')"
+      [[ -z "$ipaddr" || -z "$mac" ]] && continue
+      if [[ "$mac" == "$PRINTER_MAC_NORM" ]]; then
+        FOUND_IP="$ipaddr"
+        break
+      fi
+    done < <(ip neigh show | awk '/lladdr/ {print $1, $5}')
+  fi
+fi
+
+if [[ -z "$FOUND_IP" ]]; then
+  msg="WARN: Printer MAC $PRINTER_MAC not found on $IFACE. Possibly offline or different VLAN."
+  log "$msg"
+  mail_if "[$HOSTNAME_TAG] Printer not found" "$msg"
+  exit 1
+fi
+
+# 3) If it’s found at the right IP, we’re done.
+if [[ "$FOUND_IP" == "$DESIRED_IP" ]]; then
+  log "OK: Printer present at desired IP $DESIRED_IP."
+  exit 0
+fi
+
+log "INFO: Printer found at $FOUND_IP but desired is $DESIRED_IP."
+
+# 4) Try to force the IP via SNMP if configured; otherwise alert.
+if [[ -n "$SNMP_COMMUNITY" && -n "$OID_IP_ADDR" && -n "$OID_NETMASK" && -n "$OID_GATEWAY" ]]; then
+  log "Attempting SNMP set to push $DESIRED_IP/$NETMASK gw $GATEWAY to printer at $FOUND_IP ..."
+  # Example uses OCTET STRINGs; some devices expect IpAddress type ("a"). Adjust as needed.
+  set_ok=1
+  snmpset -v "$SNMP_VERSION" -c "$SNMP_COMMUNITY" "$FOUND_IP" \
+    "$OID_IP_ADDR" s "$DESIRED_IP" \
+    "$OID_NETMASK" s "$NETMASK" \
+    "$OID_GATEWAY" s "$GATEWAY" >/tmp/printer-ip-keeper.snmp 2>&1 || set_ok=0
+
+  if [[ $set_ok -eq 1 && -n "$OID_APPLY" ]]; then
+    # Some printers require an apply/restart flag
+    snmpset -v "$SNMP_VERSION" -c "$SNMP_COMMUNITY" "$FOUND_IP" "$OID_APPLY" i 1 >/tmp/printer-ip-keeper.apply 2>&1 || true
+  fi
+
+  if [[ $set_ok -eq 1 ]]; then
+    log "SNMP set issued. Verifying new IP $DESIRED_IP ..."
+    sleep 10
+    if ping -c1 -W2 "$DESIRED_IP" >/dev/null 2>&1; then
+      log "SUCCESS: Printer now reachable at $DESIRED_IP."
+      exit 0
+    else
+      msg="WARN: SNMP set sent but $DESIRED_IP still not reachable yet."
+      log "$msg"
+      mail_if "[$HOSTNAME_TAG] Printer IP set pending" "$msg"
+      exit 2
+    fi
+  else
+    msg="ERROR: SNMP set failed. Check OIDs/community/ACLs. See /tmp/printer-ip-keeper.snmp"
+    log "$msg"
+    mail_if "[$HOSTNAME_TAG] Printer SNMP set failed" "$msg"
+    exit 3
+  fi
+else
+  msg="NOTICE: Found printer at $FOUND_IP (MAC $PRINTER_MAC) but SNMP set is not configured. Cannot force IP."
+  log "$msg"
+  mail_if "[$HOSTNAME_TAG] Printer IP mismatch" "$msg"
+  exit 4
+fi
+
+sudo chmod +x /usr/local/sbin/printer-ip-keeper.sh
+
+# root’s crontab
+sudo crontab -e
+# add:
+*/5 * * * * /usr/local/sbin/printer-ip-keeper.sh >/var/log/printer-ip-keeper.log 2>&1
+
+
+
+
