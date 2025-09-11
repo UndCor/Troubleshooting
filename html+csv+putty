@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Store SSH Launcher</title>
+<style>
+  :root { --wm:"UnderwoodC"; }
+  body { font-family: system-ui, Segoe UI, Roboto, Arial, sans-serif; margin:24px; }
+  h1 { margin:0 0 12px 0; }
+  .bar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  input[type="file"] { padding:6px 0; }
+  input[type="text"] { padding:8px; border:1px solid #ccc; border-radius:8px; }
+  table { border-collapse:collapse; width:100%; margin-top:8px; background:rgba(255,255,255,.92); }
+  th,td { border-bottom:1px solid #eee; padding:10px 8px; text-align:left; }
+  th { background:#fafafa; position:sticky; top:0; }
+  .btn { border:1px solid #ddd; border-radius:999px; padding:6px 12px; cursor:pointer; background:white; text-decoration:none; }
+  .btn:hover { border-color:#bbb; }
+  .muted { color:#666; }
+  .warn { color:#b35a00; font-weight:600; }
+  .hidden { display:none; }
+  /* watermark */
+  .wm::before{
+    content:var(--wm); position:fixed; inset:-20vh -20vw; transform:rotate(-30deg);
+    font-size:12rem; font-weight:800; letter-spacing:.15em; text-transform:uppercase;
+    opacity:.06; color:#000; pointer-events:none; user-select:none; z-index:0;
+  }
+  .content{ position:relative; z-index:1; }
+  .hidden-marker{ position:absolute; left:-9999px; width:1px; height:1px; overflow:hidden; }
+</style>
+</head>
+<body class="wm">
+  <div class="hidden-marker" aria-hidden="true">U<br>N<br>D<br>E<br>R<br>W<br>O<br>O<br>D<br>C</div>
+
+  <div class="content">
+    <h1>Store SSH Launcher</h1>
+    <div class="bar">
+      <input id="csvFile" type="file" accept=".csv,.txt"/>
+      <label>Search:
+        <input id="search" type="text" placeholder="Filter by Store Name, Location, or IP…"/>
+      </label>
+      <label>User:
+        <input id="username" type="text" placeholder="(blank = none)"/>
+      </label>
+      <span class="muted">Columns required: <b>Location</b>, <b>Store Name</b>, <b>IP Address</b></span>
+    </div>
+
+    <table id="tbl" class="hidden">
+      <thead>
+        <tr>
+          <th style="width:10rem;">Location</th>
+          <th>Store Name</th>
+          <th style="width:12rem;">IP Address</th>
+          <th style="width:10rem;">Action</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <p class="muted">Security note: Browsers will always prompt before opening an external app. You can’t (and shouldn’t) bypass that.</p>
+  </div>
+
+<script>
+// remember username in sessionStorage
+const usernameEl = document.getElementById('username');
+(function restoreUser(){
+  const u = sessionStorage.getItem('ssh_user') || '';
+  if (u) usernameEl.value = u;
+})();
+usernameEl.addEventListener('input', ()=>{
+  sessionStorage.setItem('ssh_user', (usernameEl.value||'').trim());
+});
+
+// csv parser
+function parseCSV(text){
+  const rows=[]; let cur='', row=[], q=false;
+  for(let i=0;i<text.length;i++){ const c=text[i], n=text[i+1];
+    if(q){ if(c=='"'&&n=='"'){cur+='"'; i++;} else if(c=='"'){q=false;} else{cur+=c;} }
+    else { if(c=='"'){q=true;} else if(c==','){row.push(cur); cur='';}
+           else if(c=='\n'){row.push(cur); rows.push(row); row=[]; cur='';}
+           else if(c!='\r'){cur+=c;} }
+  }
+  if(cur.length||row.length){row.push(cur); rows.push(row);} return rows;
+}
+
+const fileInput=document.getElementById('csvFile');
+const searchEl=document.getElementById('search');
+const tbl=document.getElementById('tbl'); const tbody=tbl.querySelector('tbody');
+let data=[];
+
+function idxMap(headers){ const m={}; headers.forEach((h,i)=>m[h.trim().toLowerCase()]=i); return m; }
+function looksLikeIP(s){ if(!s) return false; const p=s.trim().split('.'); return p.length===4 && p.every(x=>/^\d{1,3}$/.test(x)&&+x>=0&&+x<=255); }
+
+function render(filter=''){
+  const f = filter.toLowerCase();
+  const uname = (usernameEl.value||'').trim();
+  tbody.innerHTML='';
+  const rows = data.filter(r => (`${r.location} ${r.name} ${r.ip}`).toLowerCase().includes(f));
+
+  for(const r of rows){
+    const tr=document.createElement('tr');
+    tr.innerHTML = `<td>${r.location}</td><td>${r.name}</td><td>${r.ip}</td>`;
+    const tdAct=document.createElement('td');
+
+    if(looksLikeIP(r.ip)){
+      const a=document.createElement('a');
+      a.textContent='Open with PuTTY (Default Settings)';
+      a.className='btn';
+      const userPart = uname ? `${encodeURIComponent(uname)}@` : '';
+      a.href = `ssh://${userPart}${r.ip}:22`;
+      tdAct.appendChild(a);
+    } else {
+      tdAct.innerHTML = '<span class="warn">Invalid IP</span>';
+    }
+    tr.appendChild(tdAct); tbody.appendChild(tr);
+  }
+  tbl.classList.toggle('hidden', rows.length===0);
+}
+
+fileInput.addEventListener('change', async e=>{
+  const file=e.target.files?.[0]; if(!file) return;
+  const rows=parseCSV(await file.text()); if(!rows.length) return;
+  const headers=rows[0].map(h=>h.trim()); const idx=idxMap(headers);
+  const iLoc=idx['location'], iName=idx['store name'], iIP=idx['ip address'];
+  if([iLoc,iName,iIP].some(x=>x===undefined)){ alert('Missing headers: Location, Store Name, IP Address'); return; }
+  data = rows.slice(1).filter(r=>r.length).map(r=>({
+    location:(r[iLoc]??'').trim(),
+    name:(r[iName]??'').trim(),
+    ip:(r[iIP]??'').trim()
+  })).filter(r=>r.location||r.name||r.ip);
+  render(searchEl.value);
+});
+searchEl.addEventListener('input', ()=>render(searchEl.value));
+usernameEl.addEventListener('input', ()=>render(searchEl.value));
+</script>
+</body>
+</html>
