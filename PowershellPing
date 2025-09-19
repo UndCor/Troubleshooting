@@ -1,0 +1,6 @@
+
+
+while ($true) {
+    Test-NetConnection -ComputerName PUBLIC.IP.ADDRESS -Port PORT
+    Start-Sleep -Seconds 5
+}
