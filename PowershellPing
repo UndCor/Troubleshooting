@@ -1,6 +1,83 @@
-
-
-while ($true) {
-    Test-NetConnection -ComputerName PUBLIC.IP.ADDRESS -Port PORT
-    Start-Sleep -Seconds 5
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Port Watch (PowerShell)</title>
+<HTA:APPLICATION
+  ID="PortWatch"
+  APPLICATIONNAME="Port Watch"
+  SCROLL="no"
+  SINGLEINSTANCE="yes"
+  BORDER="dialog"
+  WINDOWSTATE="normal"
+  CAPTION="yes"
+  SHOWINTASKBAR="yes"
+/>
+<style>
+  body { font-family: Segoe UI, Arial, sans-serif; margin: 18px; }
+  label { display: block; margin-top: 10px; font-weight: 600; }
+  input { width: 260px; padding: 6px; font-size: 14px; }
+  button { margin-top: 16px; padding: 8px 14px; font-size: 14px; }
+  .hint { color:#666; font-size:12px; margin-top:8px; }
+</style>
+<script language="JScript">
+function startWatch() {
+function trim(str) {
+  return str.replace(/^\s+|\s+$/g, "");
 }
+
+var ip   = trim(document.getElementById("ip").value);
+var port = trim(document.getElementById("port").value);
+
+  if (!ip) { alert("Please enter a Public IP Address."); return; }
+  if (!/^\d+$/.test(port)) { alert("Port must be a number."); return; }
+
+  var fso   = new ActiveXObject("Scripting.FileSystemObject");
+  var shell = new ActiveXObject("WScript.Shell");
+  var temp  = shell.ExpandEnvironmentStrings("%TEMP%");
+  var ps1   = fso.BuildPath(temp, "portwatch.ps1");
+
+  // Build the PowerShell script content
+  var content = ''
+    + '$ip   = "' + ip.replace(/"/g,'`"') + '"\r\n'
+    + '$port = ' + port + '\r\n'
+    + 'Write-Host "Watching $ip`:$port (Ctrl+C to stop)"\r\n'
+    + 'while ($true) {\r\n'
+    + '  try {\r\n'
+    + '    $ok = Test-NetConnection -ComputerName $ip -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue\r\n'
+    + '    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"\r\n'
+    + '    if ($ok) { Write-Host "$ts $ip`:$port OPEN" } else { Write-Host "$ts $ip`:$port CLOSED" }\r\n'
+    + '  } catch {\r\n'
+    + '    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"\r\n'
+    + '    Write-Host "$ts $ip`:$port ERROR: $($_.Exception.Message)"\r\n'
+    + '  }\r\n'
+    + '  Start-Sleep -Seconds 5\r\n'
+    + '}\r\n';
+
+  // Write the temp .ps1
+  var file = fso.CreateTextFile(ps1, true);
+  file.Write(content);
+  file.Close();
+
+  // Launch PowerShell (new window) with ExecutionPolicy bypassed
+  var cmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + ps1 + '"';
+  // 1 = activate & normal window; false = don’t wait (let it run independently)
+  shell.Run(cmd, 1, false);
+}
+</script>
+</head>
+<body>
+  <h2>Port Watch</h2>
+  <label for="ip">Public IP Address</label>
+  <input id="ip" type="text" placeholder="e.g., 203.0.113.10" />
+
+  <label for="port">Port</label>
+  <input id="port" type="text" placeholder="e.g., 3389" />
+
+  <button onclick="startWatch()">Start</button>
+  <div class="hint">
+    Opens a PowerShell window and checks the port every 5 seconds.  
+    Shows <b>OPEN</b> when the forward works, <b>CLOSED</b> otherwise.
+  </div>
+</body>
+</html>
